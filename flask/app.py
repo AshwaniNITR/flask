@@ -1,49 +1,88 @@
-from flask import Flask, jsonify, request, render_template_string
+!pip install flask flask-cors pyngrok
 
+from pyngrok import ngrok
+import os
+import torch
+from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS  # Import CORS
+from diffusers import StableDiffusionPipeline
+from huggingface_hub import snapshot_download
+
+
+
+
+# ✅ Initialize Flask App
 app = Flask(__name__)
+#CORS(app)  # Enable CORS for all routes
+# Allow both localhost and your deployed Vercel site
+CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://myapp-lac-nine.vercel.app"]}})
 
-# A simple in-memory structure to store tasks
-tasks = []
+# ✅ Define Model Path
+MODEL_DIR = "saved_model"
+OUTPUT_IMAGE = "generated_image.png"
 
-@app.route('/', methods=['GET'])
-def home():
-    # Display existing tasks and a form to add a new task
-    html = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Todo List</title>
-</head>
-<body>
-    <h1>Todo List</h1>
-    <form action="/add" method="POST">
-        <input type="text" name="task" placeholder="Enter a new task">
-        <input type="submit" value="Add Task">
-    </form>
-    <ul>
-        {% for task in tasks %}
-        <li>{{ task }} <a href="/delete/{{ loop.index0 }}">x</a></li>
-        {% endfor %}
-    </ul>
-</body>
-</html>
-'''
-    return render_template_string(html, tasks=tasks)
+# ✅ Load Model from Disk
+if os.path.exists(MODEL_DIR):
+    print("🔄 Loading model from local storage...")
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_DIR, torch_dtype=torch.float16
+    ).to("cuda")
+    print("✅ Model loaded successfully!")
+else:
+    raise FileNotFoundError("❌ Model not found! Please save the model first.")
 
-@app.route('/add', methods=['POST'])
-def add_task():
-    # Add a new task from the form data
-    task = request.form.get('task')
-    if task:
-        tasks.append(task)
-    return home()
+# ✅ Image Generation Function
+def generate_sd_image(prompt, num_steps=100, guidance=10):
+    """Generates an image from text and saves it."""
+    image = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        guidance_scale=guidance
+    ).images[0]
 
-@app.route('/delete/<int:index>', methods=['GET'])
-def delete_task(index):
-    # Delete a task based on its index
-    if index < len(tasks):
-        tasks.pop(index)
-    return home()
+    image.save(OUTPUT_IMAGE)
+    return OUTPUT_IMAGE
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+# ✅ API Endpoint to Generate Image
+@app.route('/generate', methods=['POST', 'OPTIONS'])  # Add OPTIONS method for CORS preflight
+def generate():
+    """API Endpoint to generate an image from text prompt."""
+    # Handle CORS preflight request
+    if request.method == 'OPTIONS':
+        response = jsonify({"message": "Preflight request successful"})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST')
+        return response
+
+    data = request.json
+    prompt = data.get("prompt", "")
+
+    if not prompt:
+        return jsonify({"error": "❌ No prompt provided!"}), 400
+
+    try:
+        image_path = generate_sd_image(prompt)
+
+        # Read the image and convert to base64
+        with open(image_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+        return jsonify({
+            "image": f"data:image/png;base64,{encoded_string}"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Additional imports for base64 encoding
+import base64
+
+# Set your ngrok authtoken
+ngrok.set_auth_token("2unN6AH1fkn0QZzvNrlLlh7utJh_3Pg9vNdiYec3Htgzbs7Dz")
+
+# Create public URL
+public_url = ngrok.connect(5000).public_url
+print(f"🚀 Public API URL: {public_url}")
+
+# Run the app
+app.run(port=5000)
